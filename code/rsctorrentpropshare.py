@@ -33,10 +33,10 @@ class RSCTorrentPropShare(Peer):
 
         This will be called after update_pieces() with the most recent state.
         """
+
         needed = lambda i: self.pieces[i] < self.conf.blocks_per_piece
         needed_pieces = filter(needed, range(len(self.pieces)))
-        np_set = set(needed_pieces)  # sets support fast intersection ops.
-
+        np_set = set(needed_pieces)
 
         logging.debug("%s here: still need pieces %s" % (
             self.id, needed_pieces))
@@ -49,33 +49,37 @@ class RSCTorrentPropShare(Peer):
         logging.debug("look at the AgentHistory class in history.py for details")
         logging.debug(str(history))
 
-        requests = []   # We'll put all the things we want here
-        # Symmetry breaking is good...
-        random.shuffle(needed_pieces)
-        
-        # Sort peers by id.  This is probably not a useful sort, but other 
-        # sorts might be useful
-        peers.sort(key=lambda p: p.id)
-        # request all available pieces from all peers!
-        # (up to self.max_requests from each)
+        requests = [] 
+
+        # COMPUTE RARITY - number of instances of a given piece
         counts = pd.DataFrame(data=np.zeros(len(self.pieces)))
-        for peer in peers:
-            av_set = set(peer.available_pieces)
-            isect = av_set.intersection(np_set)
-            for piece_index in isect:
+        for peer in peers:  
+            for piece_index in set(peer.available_pieces):
                 counts.iloc[piece_index, 0] = counts.iloc[piece_index, 0] + 1
 
+        # RAREST FIRST - request the pieces held by the fewest people
+        # shuffle counts to break symmetry, then sort
+        counts = counts.sample(frac=1)
+        sorted_counts = counts.sort_values(0)
 
-        filtered_counts = counts[counts.index.isin(np_set)]
-        sorted_counts = filtered_counts.sort_values(0)
-        n = min(self.max_requests, sorted_counts.size)
+        # filter to only request elements we need
+        filtered_sorted_counts = sorted_counts[sorted_counts.index.isin(np_set)]
+        max_pieces_to_download = min(self.max_requests, filtered_sorted_counts.size)
 
-        for piece_id in sorted_counts.index.values[:n]:
-             for peer in peers:
+        # iterate peers, requesting pieces in order of rarity
+        for peer in peers:
+            pieces_downloaded_from_peer = 0
+            for piece_id in filtered_sorted_counts.index.values:
                 if piece_id in peer.available_pieces:     
                     start_block = self.pieces[piece_id]
                     r = Request(self.id, peer.id, piece_id, start_block)
                     requests.append(r)
+
+                    # check that we do not exceed maximum possible downloads
+                    pieces_downloaded_from_peer = pieces_downloaded_from_peer + 1
+                    if pieces_downloaded_from_peer == max_pieces_to_download:
+                        break
+
         return requests
 
     def uploads(self, requests, peers, history):
@@ -89,23 +93,19 @@ class RSCTorrentPropShare(Peer):
         In each round, this will be called after requests().
         """
 
-        round = history.current_round()
+        current_round = history.current_round()
         logging.debug("%s again.  It's round %d." % (
-            self.id, round))
+            self.id, current_round))
 
         if len(requests) == 0:
-            requesters_with_pos_upload = []
-            requesters = []
-            peer_blocks_downloaded = pd.DataFrame()
-
-
             logging.debug("No one wants my pieces!")
             chosen = []
             bws = []
         else:
             logging.debug("Still here: uploading to a random peer")
 
-            prev_rounds = history.downloads[-1:]
+            n_rounds = 2
+            prev_rounds = history.downloads[-n_rounds:]
             peer_blocks_downloaded = pd.DataFrame(data=np.zeros(len(peers)), index=[peer.id for peer in peers])
             for prev_round in prev_rounds:
                 for download in prev_round:
@@ -119,21 +119,23 @@ class RSCTorrentPropShare(Peer):
             filtered_peer_blocks_downloaded = peer_blocks_downloaded[peer_blocks_downloaded.index.isin(requesters_with_pos_upload)]        
             filtered_peer_blocks_downloaded_percentage = filtered_peer_blocks_downloaded / filtered_peer_blocks_downloaded.sum()
 
-            # TODO: update to only give .1 when there are no propshares
+            # assign some bw to prop sharing, assign some bw to optimisitic unchoking
             optimistic_bw_percentage = .1 
             propshare_bw  = self.up_bw * (1-optimistic_bw_percentage)
             propshare_peer_bw = (filtered_peer_blocks_downloaded_percentage * propshare_bw).round()
             rounded_propshare_bw = propshare_peer_bw.sum().values[0]
 
-            optimistic_bw = self.up_bw - rounded_propshare_bw
+            # only assign some BW to optimistic unchoking
+            optimistic_bw = self.up_bw - rounded_propshare_bw if rounded_propshare_bw > 0 else round(self.up_bw * optimistic_bw_percentage)
 
             # filtered candidates for optimistic unchocking
             other_requesters = list(set([requester for requester in requesters if requester not in requesters_with_pos_upload]))
 
             # OPTIMISTIC UNCHOKING: unchoke randomly every 3 stages
+            optimistic_rounds = 3
             if len(other_requesters) > 0:
                 if self.state["optimistic_spot"] is not None:
-                    if self.state["round"] % 3 == 0 or self.state["optimistic_spot"] in requesters_with_pos_upload:            
+                    if self.state["round"] % optimistic_rounds == 0 or self.state["optimistic_spot"] in requesters_with_pos_upload:            
                         optimistic_spot = [random.choice(other_requesters)]
                     else:
                         optimistic_spot = [self.state["optimistic_spot"]]
@@ -144,8 +146,9 @@ class RSCTorrentPropShare(Peer):
 
             else:
                 optimistic_spot = []
+                self.state["optimistic_spot"] = None
 
-            # TODO: handle case where you are reciprocating with all players
+            # create chosen array
             chosen = requesters_with_pos_upload + optimistic_spot
 
             # Evenly "split" my upload bandwidth among the one chosen requester
