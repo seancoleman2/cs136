@@ -135,6 +135,8 @@ class RSCTorrentStd(Peer):
             # Evenly "split" my upload bandwidth among the one chosen requester
             if(len(chosen) > 0):
                 bws = even_split(self.up_bw, len(chosen))
+
+                print(bws)
             else:
                 bws = []
 
