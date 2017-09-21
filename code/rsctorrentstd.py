@@ -35,6 +35,9 @@ class RSCTorrentStd(Peer):
         needed_pieces = filter(needed, range(len(self.pieces)))
         np_set = set(needed_pieces)  # sets support fast intersection ops.
 
+        print("peers coming hot \n \n")
+        print([peer.id for peer in peers])
+        print("\n\n")
 
         logging.debug("%s here: still need pieces %s" % (
             self.id, needed_pieces))
