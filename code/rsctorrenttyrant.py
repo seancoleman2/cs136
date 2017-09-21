@@ -134,7 +134,6 @@ class RSCTorrentTyrant(Peer):
             chosen = []
             bws = []
         else:
-
             if round != 0:
                 prev_round_downloads = history.downloads[-1:]
                 prev_round_unchokers = []
@@ -187,6 +186,8 @@ class RSCTorrentTyrant(Peer):
                     if total_t_j < bw_cap:
                         chosen.append(peer)
                         bws.append(float(self.state["expected_upload_rates"][peer]))
+                    else: 
+                        total_t_j - float(self.state["expected_upload_rates"][peer])
 
 
         # create actual uploads out of the list of peer ids and bandwidths
