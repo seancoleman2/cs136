@@ -54,8 +54,6 @@ def median(numeric):
         upper = vals[count/2]
         return (float(lower + upper)) / 2
 
-
-
 def even_split(n, k):
     """
     n and k must be ints.
