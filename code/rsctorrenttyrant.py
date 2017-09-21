@@ -8,18 +8,21 @@
 
 import random
 import logging
+import math
+import numpy as np 
+import pandas as pd
 
 from messages import Upload, Request
 from util import even_split
 from peer import Peer
-import numpy as np 
-import pandas as pd
+
 
 class RSCTorrentTyrant(Peer):
     def post_init(self):
         print "post_init(): %s here!" % self.id
 
         self.state = dict()
+
         # to adjust flow in and expected upload rate to attain unchoking
         self.state["conseq_rounds_unchoked_by"] = dict()
 
@@ -28,8 +31,8 @@ class RSCTorrentTyrant(Peer):
         self.state["blocks_downloaded_last_round"] = dict() # represents total download_in 
 
         # used for ratios
-        self.state["expected_download_rates"] = dict()
-        self.state["expected_upload_rates"] = dict()    
+        self.state["exp_down_bw"] = dict()
+        self.state["exp_min_up_bw"] = dict()    
     
     def requests(self, peers, history):
         """
@@ -119,12 +122,12 @@ class RSCTorrentTyrant(Peer):
 
                 # we are estimating the other peers have the same number 
                 # of upload spots and bw in the first round
-                self.state["expected_download_rates"][peer.id] = initializer
-                self.state["expected_upload_rates"][peer.id] = initializer
+                self.state["exp_down_bw"][peer.id] = initializer
+                self.state["exp_min_up_bw"][peer.id] = initializer
 
             else: 
                 piece_delta = len(peer.available_pieces) - self.state["previously_available_pieces"][peer.id]
-                self.state["blocks_downloaded_last_round"][peer.id] = piece_delta*self.conf.blocks_per_piece
+                self.state["blocks_downloaded_last_round"][peer.id] = piece_delta * self.conf.blocks_per_piece
 
             # update previously available pieces at "end of round" - this will not be adjusted after this
             self.state["previously_available_pieces"][peer.id] = len(peer.available_pieces)
@@ -136,62 +139,69 @@ class RSCTorrentTyrant(Peer):
         else:
             if round != 0:
                 prev_round_downloads = history.downloads[-1:]
-                prev_round_unchokers = []
+                prev_round_unchokers = set([])
+
+                # compute how many blocks you have downloaded form each peer j last round
+                blocks_downloaded_last_round = pd.DataFrame(data=np.zeros(len(peers)), index=[peer.id for peer in peers])
                 for round in prev_round_downloads:
-                    for download in round:
-                        # expected download rate is the number of blocks you downloaded
-                        # from this person last round
-                        prev_round_unchokers.append(download.from_id)
+                    for download in round: 
+                        blocks_downloaded_last_round.loc[download.from_id] += download.blocks
+                        prev_round_unchokers.add(download.from_id)
 
-                        self.state["expected_download_rates"][download.from_id] = download.blocks
-                        self.state["conseq_rounds_unchoked_by"][download.from_id] += 1 
+                # if currently unchoked, expected download rate is the number of blocks you downloaded
+                for prev_round_unchoker in prev_round_unchokers:
+                    self.state["exp_down_bw"][prev_round_unchoker] = blocks_downloaded_last_round.loc[prev_round_unchoker].values[0]
+                    self.state["conseq_rounds_unchoked_by"][prev_round_unchoker] += 1 
 
-                        # if you have been unchoked for more than 2 rounds
-                        # decrease your expected upload rate
-                        if self.state["conseq_rounds_unchoked_by"][download.from_id] > 2: 
-                            u_j = self.state["expected_upload_rates"][download.from_id]
-                            self.state["expected_upload_rates"][download.from_id] = 0.9 * float(u_j)
+                    # if you have been unchoked for more than 2 rounds, decrease your expected required minimum upload rate for reciprocation
+                    if self.state["conseq_rounds_unchoked_by"][prev_round_unchoker] > 2: 
+                        u_j = self.state["exp_min_up_bw"][prev_round_unchoker]
+                        gamma = .1
+                        self.state["exp_min_up_bw"][prev_round_unchoker] = (1 - gamma) * u_j
 
                 # those not unchoking us
-                choked_peers = [x for x in [peer.id for peer in peers] if x not in prev_round_unchokers]
-                for peer in choked_peers:
-                    # from book, expect flow to be download_in/4
-                    self.state["expected_download_rates"][peer] = float(even_split(self.state["blocks_downloaded_last_round"][peer], init_spots)[0])
+                prev_round_chokers = [x for x in [peer.id for peer in peers] if x not in prev_round_unchokers]
+                for prev_round_choker in prev_round_chokers:
+                    # expect flow to be download_in/4
+                    self.state["exp_down_bw"][prev_round_choker] = self.state["blocks_downloaded_last_round"][prev_round_choker] / float(init_spots)
 
-                    # increase T_j for those who are not unchoking us
-                    self.state["expected_upload_rates"][peer] = 1.2*float(self.state["expected_upload_rates"][peer])
-                    self.state["conseq_rounds_unchoked_by"][peer] = 0
+                    # increase T_j for those who are choking us
+                    alpha = .2
+                    self.state["exp_min_up_bw"][prev_round_choker] = (1 + alpha) * self.state["exp_min_up_bw"][prev_round_choker]
+                    self.state["conseq_rounds_unchoked_by"][prev_round_choker] = 0
 
+            # ratios
             ratios = dict()
-            f_ji, t_j = self.state["expected_download_rates"], self.state["expected_upload_rates"]
+            f_ji, t_j = self.state["exp_down_bw"], self.state["exp_min_up_bw"]
             for peer in peers:
+                # if they have been doing no downloading, do not share
                 if t_j[peer.id] == 0: 
-                    # is this correct???
                     ratios[peer.id] = 0.0
+                # otherwise, look at the return on investment
                 else:
                     ratios[peer.id] = float(f_ji[peer.id])/float(t_j[peer.id])
 
             sorted_ratios = sorted(ratios, key=ratios.get, reverse=True)
 
-            
+            # iterate requesters in order or sorted ratios
             requesters = [request.requester_id for request in requests]
             chosen, bws = [], [] 
             total_t_j = 0.0
             for peer in sorted_ratios: 
                 if peer in requesters:
-                    # keep track of total expected upload bw
-                    total_t_j = float(self.state["expected_upload_rates"][peer]) + total_t_j
+                    # round up -> going below expected min threshold will waste BW
+                    peer_exp_min_up_bw = math.ceil(self.state["exp_min_up_bw"][peer])
 
-                    # check to see we don't exceed the upload capacity, and upload approapriate bandwidth to person
-                    if total_t_j < bw_cap:
+                    # check to see we don't exceed the upload capacity
+                    if peer_exp_min_up_bw + total_t_j < bw_cap:
                         chosen.append(peer)
-                        bws.append(float(self.state["expected_upload_rates"][peer]))
-                    else: 
-                        total_t_j - float(self.state["expected_upload_rates"][peer])
+                        bws.append(peer_exp_min_up_bw)
 
+                        # increment
+                        total_t_j += peer_exp_min_up_bw
 
         # create actual uploads out of the list of peer ids and bandwidths
         uploads = [Upload(self.id, peer_id, bw)
                    for (peer_id, bw) in zip(chosen, bws)]
-            
+
         return uploads

@@ -120,7 +120,7 @@ class RSCTorrentPropShare(Peer):
             filtered_peer_blocks_downloaded_percentage = filtered_peer_blocks_downloaded / filtered_peer_blocks_downloaded.sum()
 
             # assign some bw to prop sharing, assign some bw to optimisitic unchoking
-            optimistic_bw_percentage = .1 
+            optimistic_bw_percentage = .1
             propshare_bw  = self.up_bw * (1-optimistic_bw_percentage)
             propshare_peer_bw = (filtered_peer_blocks_downloaded_percentage * propshare_bw).round()
             rounded_propshare_bw = propshare_peer_bw.sum().values[0]
