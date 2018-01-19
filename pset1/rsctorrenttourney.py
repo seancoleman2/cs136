@@ -17,7 +17,7 @@ from util import even_split
 from peer import Peer
 
 
-class RSCTorrentTyrant(Peer):
+class RSCTorrentTourney(Peer):
     def post_init(self):
         print "post_init(): %s here!" % self.id
 
@@ -103,7 +103,7 @@ class RSCTorrentTyrant(Peer):
         In each round, this will be called after requests().
         """
 
-        ### CAPPED Version of Tyrant because we have Max Bandwidth ## 
+        ### UNCAPPED Version of Tyrant  ## 
 
         # initially assume 4 upload spots, with same bw_cap 
         init_spots, bw_cap, = 4, self.up_bw
@@ -158,7 +158,7 @@ class RSCTorrentTyrant(Peer):
                         u_j = self.state["exp_min_up_bw"][prev_round_unchoker]
                         gamma = .1
                         sigma = .5
-                        self.state["exp_min_up_bw"][prev_round_unchoker] = (1 - gamma - sigma**round) * u_j
+                        self.state["exp_min_up_bw"][prev_round_unchoker] = (1 - gamma - sigma**history.current_round()) * u_j
 
                 # those not unchoking us
                 prev_round_chokers = [x for x in [peer.id for peer in peers] if x not in prev_round_unchokers]
@@ -168,8 +168,8 @@ class RSCTorrentTyrant(Peer):
 
                     # increase T_j for those who are choking us
                     alpha = .2
-                    sigma = .5
-                    self.state["exp_min_up_bw"][prev_round_choker] = (1 + alpha + sigma**round) * self.state["exp_min_up_bw"][prev_round_choker]
+                    sigma = .5  
+                    self.state["exp_min_up_bw"][prev_round_choker] = (1 + alpha + sigma**history.current_round()) * self.state["exp_min_up_bw"][prev_round_choker]
                     self.state["conseq_rounds_unchoked_by"][prev_round_choker] = 0
 
             # ratios
@@ -185,22 +185,50 @@ class RSCTorrentTyrant(Peer):
 
             sorted_ratios = sorted(ratios, key=ratios.get, reverse=True)
 
+            # find list of random chokers
+            requesters = [request.requester_id for request in requests]
+            requester_chokers = set(requesters).intersection(set(prev_round_chokers))
+    
+            # optimism bandwidth
+            if history.current_round() < 15 and len(requester_chokers) > 0:
+                beta = .25
+                optimism_bw = math.floor(bw_cap * beta)
+                reciprocation_bw_cap = bw_cap - optimism_bw
+
+                # randomly chose a choker to unchoke
+                random_requester_choker = random.choice(list(requester_chokers))
+
+                # allocate exploration bw
+                chosen, bws = [random_requester_choker], [optimism_bw]
+            else:
+                reciprocation_bw_cap = bw_cap
+                chosen, bws = [], []
+                random_requester_choker = None
+
             # iterate requesters in order or sorted ratios
             requesters = [request.requester_id for request in requests]
-            chosen, bws = [], [] 
+ 
             total_t_j = 0.0
             for peer in sorted_ratios: 
-                if peer in requesters:
+                if peer in requesters and peer != random_requester_choker:
                     # round up -> going below expected min threshold will waste BW
                     peer_exp_min_up_bw = math.ceil(self.state["exp_min_up_bw"][peer])
 
                     # check to see we don't exceed the upload capacity
-                    if peer_exp_min_up_bw + total_t_j < bw_cap:
+                    if peer_exp_min_up_bw + total_t_j < reciprocation_bw_cap:
                         chosen.append(peer)
                         bws.append(peer_exp_min_up_bw)
 
                         # increment
                         total_t_j += peer_exp_min_up_bw
+
+            # randomly assign any extra bandwidth 
+            left_over_bw = reciprocation_bw_cap - total_t_j
+            requesters_not_allocated_bw = [requester for requester in requesters if requester not in chosen]
+            if len(requesters_not_allocated_bw) > 0:
+                left_over_random_choice = random.choice(requesters_not_allocated_bw)
+                chosen.append(left_over_random_choice) 
+                bws.append(left_over_bw)            
 
         # create actual uploads out of the list of peer ids and bandwidths
         uploads = [Upload(self.id, peer_id, bw)

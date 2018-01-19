@@ -103,7 +103,7 @@ class RSCTorrentTyrant(Peer):
         In each round, this will be called after requests().
         """
 
-        ### CAPPED Version of Tyrant because we have Max Bandwidth ## 
+        ### UNCAPPED Version of Tyrant ## 
 
         # initially assume 4 upload spots, with same bw_cap 
         init_spots, bw_cap, = 4, self.up_bw
